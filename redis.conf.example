@@ -1,0 +1,15 @@
+port 6379
+daemonize no
+supervised no
+appendonly yes
+protected-mode yes
+user default off
+user admin on >YOUR_PASSWORD_HERE ~* &* +@all
+acllog-max-len 128
+maxmemory 256mb
+maxmemory-policy allkeys-lru
+tcp-keepalive 300
+timeout 0
+databases 16
+always-show-logo no
+loglevel notice
