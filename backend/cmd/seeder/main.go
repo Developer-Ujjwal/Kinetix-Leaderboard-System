@@ -93,7 +93,12 @@ func main() {
 	
 	for i, user := range topUsers {
 		username := user.Member.(string)
-		rating := int(user.Score)
+		// Fetch actual rating from metadata hash (not composite score from sorted set)
+		rating, err := redisRepo.GetUserScore(ctx, username)
+		if err != nil {
+			log.Printf("   %d. %s - Rating: ERROR (%v)", i+1, username, err)
+			continue
+		}
 		log.Printf("   %d. %s - Rating: %d", i+1, username, rating)
 	}
 

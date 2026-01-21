@@ -27,7 +27,7 @@ export const useLeaderboard = () => {
     },
     getNextPageParam: (lastPage) => lastPage.nextOffset,
     initialPageParam: 0,
-    staleTime: 30000, // Consider data fresh for 30 seconds
+    staleTime: 0, // Always treat data as stale - refetch immediately when invalidated
     gcTime: 5 * 60 * 1000, // Keep unused data in cache for 5 minutes
   });
 };

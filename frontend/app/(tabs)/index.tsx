@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import {
   View,
   Text,
@@ -13,6 +13,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import FontAwesome from '@expo/vector-icons/FontAwesome';
 import { useLeaderboard } from '../../src/hooks/useLeaderboard';
 import { useUserSearch } from '../../src/hooks/useUserSearch';
+import { useLeaderboardSocket } from '../../src/hooks/useLeaderboardSocket';
 import { SearchBar } from '../../src/components/SearchBar';
 import { UserRow } from '../../src/components/UserRow';
 import { SkeletonLoader } from '../../src/components/SkeletonLoader';
@@ -22,6 +23,23 @@ import { colors, spacing, typography } from '../../src/theme';
 
 export default function LeaderboardScreen() {
   const [searchQuery, setSearchQuery] = useState('');
+  
+  // Track if user is actively searching (prevents background updates from clearing search)
+  const isSearchActive = searchQuery.length >= 3;
+  
+  // Log search state changes for debugging
+  useEffect(() => {
+    console.log(`[UI] Search state changed: "${searchQuery}" (isActive: ${isSearchActive})`);
+  }, [searchQuery, isSearchActive]);
+
+  // WebSocket connection for real-time updates (web only)
+  const { isConnected, isSupported } = useLeaderboardSocket({
+    enabled: true,
+    isSearchActive, // Pass search state to prevent background updates during search
+    onConnect: () => console.log('[UI] ✅ WebSocket connected'),
+    onDisconnect: () => console.log('[UI] ❌ WebSocket disconnected'),
+    onError: (error) => console.error('[UI] ⚠️ WebSocket error:', error),
+  });
 
   // Leaderboard infinite scroll
   const {
@@ -52,6 +70,16 @@ export default function LeaderboardScreen() {
     }
     return [];
   }, [isSearching, searchResults, leaderboardData]);
+  
+  // Handle search query changes with automatic refetch on clear
+  const handleSearchChange = useCallback((text: string) => {
+    setSearchQuery(text);
+    // When user clears search (from active search to empty), refetch leaderboard immediately
+    if (searchQuery.length >= 3 && text.length === 0) {
+      console.log('[UI] Search cleared - refetching leaderboard');
+      refetch();
+    }
+  }, [searchQuery.length, refetch]);
 
   // Get total user count
   const totalUsers = leaderboardData?.pages[0]?.total ?? 0;
@@ -92,11 +120,11 @@ export default function LeaderboardScreen() {
     () => (
       <SearchBar
         value={searchQuery}
-        onChangeText={setSearchQuery}
+        onChangeText={handleSearchChange}
         isLoading={isSearchLoading}
       />
     ),
-    [searchQuery, isSearchLoading]
+    [searchQuery, handleSearchChange, isSearchLoading]
   );
 
   const ListHeaderStats = React.useMemo(
@@ -172,15 +200,22 @@ export default function LeaderboardScreen() {
             <Text style={styles.headerSubtitle}>The pinnacle of performance this season.</Text>
           </View>
           <View style={styles.headerRight}>
-            <Text style={styles.statsLabel}>Total Participants</Text>
+            <Text style={styles.statsLabel}>
+              {isSearching ? 'Search Results' : 'Total Participants'}
+            </Text>
             {!isSearching && totalUsers > 0 && (
               <Text style={styles.statsValue}>
                 {totalUsers.toLocaleString()} users
               </Text>
             )}
-            {isSearching && (
+            {isSearching && displayData.length > 0 && (
               <Text style={styles.statsValue}>
                 {displayData.length} {displayData.length === 1 ? 'result' : 'results'}
+              </Text>
+            )}
+            {isSearching && displayData.length === 0 && !isSearchLoading && (
+              <Text style={styles.statsValue}>
+                No records found
               </Text>
             )}
           </View>

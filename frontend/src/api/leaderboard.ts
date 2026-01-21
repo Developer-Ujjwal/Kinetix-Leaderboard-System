@@ -89,4 +89,12 @@ export const leaderboardApi = {
     const response = await apiClient.get('/health');
     return response.data;
   },
+
+  /**
+   * Trigger load simulation (stress test)
+   */
+  simulateLoad: async (): Promise<{ status: string; message: string; details: string }> => {
+    const response = await apiClient.post('/debug/simulate');
+    return response.data;
+  },
 };

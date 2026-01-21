@@ -11,13 +11,17 @@ import (
 
 	"backend/internal/api/handlers"
 	"backend/internal/config"
+	"backend/internal/jobs"
 	"backend/internal/repository"
 	"backend/internal/service"
+	"backend/internal/websocket"
+	"backend/internal/worker"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/recover"
+	fiberws "github.com/gofiber/websocket/v2"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -31,7 +35,7 @@ func main() {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	// Initialize PostgreSQL
+	// Initialize PostgreSQL with connection pooling
 	db, err := initPostgres(cfg)
 	if err != nil {
 		log.Fatalf("Failed to connect to PostgreSQL: %v", err)
@@ -55,11 +59,39 @@ func main() {
 	}
 	log.Println("✓ Database migrations completed")
 
-	// Initialize service
-	leaderboardService := service.NewLeaderboardService(redisRepo, postgresRepo)
+	// Initialize Worker Pool for PostgreSQL persistence
+	workerCount := 20     // Number of worker goroutines
+	queueSize := 1000     // Buffered channel size
+	workerPool := worker.NewWorkerPool(workerCount, queueSize, postgresRepo)
+	workerPool.Start()
 
-	// Initialize handlers
-	leaderboardHandler := handlers.NewLeaderboardHandler(leaderboardService)
+	// Initialize WebSocket Hub
+	hub := websocket.NewHub(redisRepo, redisClient)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go hub.Run(ctx)
+
+	// Initialize service with worker pool and redis client
+	leaderboardService := service.NewLeaderboardService(redisRepo, postgresRepo, workerPool, redisClient)
+
+	// Initialize Simulation Manager (high-performance internal job)
+	simulatorConfig := jobs.SimulatorConfig{
+		TickInterval:   500 * time.Millisecond, // 2 ticks/sec (slowed down)
+		UpdatesPerTick: 1,                      // 1 update per tick = 2 updates/sec
+		MinScoreChange: -50,
+		MaxScoreChange: 50,
+	}
+	simulator := jobs.NewSimulationManager(leaderboardService, simulatorConfig)
+	
+	// Start simulator in background
+	simCtx, simCancel := context.WithCancel(context.Background())
+	defer simCancel()
+	if err := simulator.Start(simCtx); err != nil {
+		log.Printf("⚠️ Failed to start simulator: %v", err)
+	}
+
+	// Initialize handlers with hub
+	leaderboardHandler := handlers.NewLeaderboardHandler(leaderboardService, hub)
 
 	// Create Fiber app
 	app := fiber.New(fiber.Config{
@@ -88,6 +120,22 @@ func main() {
 	api.Get("/leaderboard", leaderboardHandler.GetLeaderboard)
 	api.Get("/search/:username", leaderboardHandler.SearchUser)
 	api.Get("/health", leaderboardHandler.HealthCheck)
+	
+	// Debug routes (load simulation)
+	debug := api.Group("/debug")
+	debug.Post("/simulate", leaderboardHandler.SimulateLoad)
+	
+	// WebSocket route with upgrade middleware
+	app.Use("/ws", func(c *fiber.Ctx) error {
+		// Check if it's a WebSocket upgrade request
+		if fiberws.IsWebSocketUpgrade(c) {
+			return c.Next()
+		}
+		return fiber.ErrUpgradeRequired
+	})
+	app.Get("/ws", fiberws.New(func(c *fiberws.Conn) {
+		leaderboardHandler.HandleWebSocket(c)
+	}))
 
 	// Root route
 	app.Get("/", func(c *fiber.Ctx) error {
@@ -99,11 +147,14 @@ func main() {
 				"GET /api/v1/leaderboard",
 				"GET /api/v1/search/:username",
 				"GET /api/v1/health",
+				"POST /api/v1/debug/simulate",
+				"WS /ws (WebSocket)",
 			},
+			"websocket_clients": hub.GetClientCount(),
 		})
 	})
 
-	// Graceful shutdown
+	// Graceful shutdown with worker pool flushing
 	go func() {
 		quit := make(chan os.Signal, 1)
 		signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -111,6 +162,11 @@ func main() {
 
 		log.Println("\n🛑 Shutting down server...")
 
+		// First, stop simulator
+		log.Println("⏹️ Stopping simulator...")
+		simulator.Stop()
+
+		// Second, stop accepting new HTTP requests
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
@@ -118,7 +174,13 @@ func main() {
 			log.Printf("Server forced to shutdown: %v", err)
 		}
 
-		// Close database connections
+		// Third, gracefully shutdown worker pool (flush pending writes)
+		log.Println("🔄 Flushing worker pool (pending database writes)...")
+		if err := workerPool.Shutdown(30 * time.Second); err != nil {
+			log.Printf("Worker pool shutdown error: %v", err)
+		}
+
+		// Third, close database connections
 		if err := postgresRepo.Close(); err != nil {
 			log.Printf("Error closing PostgreSQL: %v", err)
 		}
@@ -154,10 +216,12 @@ func initPostgres(cfg *config.Config) (*gorm.DB, error) {
 		return nil, err
 	}
 
-	// Configure connection pool
-	sqlDB.SetMaxOpenConns(25)
-	sqlDB.SetMaxIdleConns(5)
+	// Configure connection pool for worker pool (20 workers + buffer)
+	// Max connections should be >= number of workers to prevent blocking
+	sqlDB.SetMaxOpenConns(30)      // Allows 20 workers + 10 buffer for other operations
+	sqlDB.SetMaxIdleConns(10)      // Keep some connections idle for reuse
 	sqlDB.SetConnMaxLifetime(5 * time.Minute)
+	sqlDB.SetConnMaxIdleTime(2 * time.Minute)
 
 	// Test connection
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -166,6 +230,8 @@ func initPostgres(cfg *config.Config) (*gorm.DB, error) {
 	if err := sqlDB.PingContext(ctx); err != nil {
 		return nil, err
 	}
+
+	log.Printf("✓ PostgreSQL connection pool configured: MaxOpen=%d, MaxIdle=%d", 30, 10)
 
 	return db, nil
 }
