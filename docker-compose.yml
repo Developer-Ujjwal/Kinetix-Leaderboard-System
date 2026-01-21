@@ -11,6 +11,8 @@ services:
     restart: unless-stopped
     volumes:
       - postgres-data:/var/lib/postgresql/data
+    networks:
+      - leaderboard-network
 
   redis:
     image: redis:latest
@@ -26,6 +28,36 @@ services:
       --requirepass ${REDIS_PASSWORD}
       --maxmemory 256mb
       --maxmemory-policy allkeys-lru
+    networks:
+      - leaderboard-network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: leaderboard-backend
+    ports:
+      - "${BACKEND_PORT}:8000"
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=leaderboard
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+    networks:
+      - leaderboard-network
+
+networks:
+  leaderboard-network:
+    driver: bridge
 
 volumes:
   postgres-data:

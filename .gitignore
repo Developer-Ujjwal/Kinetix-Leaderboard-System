@@ -1,11 +1,13 @@
 .env
 redis.conf
+redis.conf.example
 
 ARCHITECTURE.md
 IMPLEMENTATION.md
-README.md
 QUICKSTART.md
 test_api.sh
 MakeFile
 GUIDE.md
 TESTING.md
+WORKER_POOL.md
+WORKER_POOL_SUMMARY.md
